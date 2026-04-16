@@ -61,27 +61,28 @@ Tested on [LongMemEval](https://github.com/xiaowu0162/LongMemEval) — 470 quest
 
 | Embedding | R@5 | R@10 | R@20 | Search P50 | Install |
 |-----------|-----|------|------|------------|---------|
-| HashEmbedding (no model) | 0.76 | 0.80 | 0.85 | 10ms | `pip install smriti-mem` |
-| MiniLM (86MB) | **0.91** | **0.96** | **0.98** | 170ms | `pip install smriti-mem[small]` |
+| HashEmbedding (no model) | 0.77 | 0.87 | 0.95 | 10ms | `pip install smriti-mem` |
+| MiniLM (86MB) | **0.90** | **0.96** | **0.99** | 170ms | `pip install smriti-mem[small]` |
+| BGE-large (1.3GB) | 0.88 | 0.91 | 0.97 | — | `pip install smriti-mem[large]` |
 
 ### Detailed Breakdown (MiniLM)
 
 ```
 Question Type               | Count |   R@5 |  R@10 |  R@20
 ----------------------------|-------|-------|-------|-------
-single-session-user         |    64 |  0.77 |  0.91 |  0.97
-single-session-assistant    |    56 |  0.80 |  0.89 |  0.98
+single-session-user         |    64 |  0.78 |  0.92 |  0.98
+single-session-assistant    |    56 |  0.79 |  0.89 |  0.98
 single-session-preference   |    30 |  0.87 |  0.97 |  0.97
-temporal-reasoning          |   127 |  0.94 |  0.96 |  0.97
+temporal-reasoning          |   127 |  0.91 |  0.98 |  1.00
 knowledge-update            |    72 |  1.00 |  1.00 |  1.00
-multi-session               |   121 |  0.97 |  0.99 |  1.00
+multi-session               |   121 |  0.97 |  0.98 |  1.00
 ----------------------------|-------|-------|-------|-------
-OVERALL                     |   470 |  0.91 |  0.96 |  0.98
+OVERALL                     |   470 |  0.90 |  0.96 |  0.99
 ```
 
-> **R@20 = 0.98** — Smriti finds the right memory 98% of the time with MiniLM.
+> **R@20 = 0.99** — Smriti finds the right memory 99% of the time with MiniLM.
 > **knowledge-update = 1.00** — Perfect recall on facts that change over time.
-> HashEmbedding works offline with zero downloads — great for air-gapped or corporate environments.
+> **HashEmbedding R@20 = 0.95** with zero model downloads — great for air-gapped or corporate environments.
 
 ## Install
 
