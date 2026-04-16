@@ -1,0 +1,39 @@
+name: Benchmark
+
+on:
+  workflow_dispatch:  # manual trigger from Actions tab
+
+jobs:
+  benchmark:
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        embedding: [hash, default, bge]
+    timeout-minutes: 360
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python 3.12
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install Smriti + sentence-transformers
+        run: |
+          pip install -e ".[dev]"
+          pip install sentence-transformers
+
+      - name: Run LongMemEval-S (--embedding ${{ matrix.embedding }})
+        run: |
+          LIMIT_FLAG=""
+          if [ "${{ matrix.embedding }}" = "bge" ]; then
+            LIMIT_FLAG="--limit 160"
+          fi
+          python bench/run_longmemeval.py --embedding ${{ matrix.embedding }} $LIMIT_FLAG
+
+      - name: Upload results
+        uses: actions/upload-artifact@v4
+        with:
+          name: benchmark-${{ matrix.embedding }}
+          path: bench/progress.log

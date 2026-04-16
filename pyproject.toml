@@ -1,0 +1,56 @@
+[build-system]
+requires = ["setuptools>=68.0", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "smriti-mem"
+version = "0.6.0"
+description = "The universal memory layer. Extremely fast, never loses data."
+readme = "README.md"
+license = {text = "Apache-2.0"}
+requires-python = ">=3.10"
+authors = [{name = "Sumanth Reddy"}]
+keywords = ["ai", "memory", "agents", "llm", "semantic-search"]
+classifiers = [
+    "Development Status :: 3 - Alpha",
+    "Intended Audience :: Developers",
+    "License :: OSI Approved :: Apache Software License",
+    "Programming Language :: Python :: 3",
+    "Topic :: Scientific/Engineering :: Artificial Intelligence",
+]
+dependencies = [
+    "chromadb>=0.4.0",
+    "pydantic>=2.0",
+    "networkx>=3.0",
+]
+
+[project.optional-dependencies]
+mcp = ["mcp[cli]>=1.2.0"]
+small = ["sentence-transformers>=2.2"]
+large = ["sentence-transformers>=2.2"]
+stella = ["sentence-transformers>=2.2", "xformers"]
+onnx = ["onnxruntime>=1.16", "tokenizers>=0.15"]
+nlp = ["spacy>=3.7"]
+all = ["smriti-mem[small,mcp,nlp,onnx]"]
+dev = ["pytest>=7.0", "pytest-asyncio>=0.21", "ruff>=0.4"]
+
+[project.scripts]
+smriti-mcp = "smriti.mcp_server:main"
+
+[project.urls]
+Homepage = "https://github.com/sumanthreddyy/Smriti"
+Issues = "https://github.com/sumanthreddyy/Smriti/issues"
+Changelog = "https://github.com/sumanthreddyy/Smriti/releases"
+
+[tool.setuptools.packages.find]
+include = ["smriti*"]
+
+[tool.ruff]
+target-version = "py310"
+line-length = 100
+
+[tool.ruff.lint]
+select = ["E", "F", "W", "I"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
