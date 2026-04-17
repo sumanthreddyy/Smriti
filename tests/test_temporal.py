@@ -34,13 +34,11 @@ class TestValidAt:
 
     def test_valid_range(self, mem):
         """Memory with both bounds respects the range."""
-        from smriti.types import MemoryEntry
-        entry = MemoryEntry(
-            content="Q1 budget approved",
+        mem.add(
+            "Q1 budget approved",
             valid_from="2026-01-01",
             valid_to="2026-03-31",
         )
-        mem.add_entry(entry)
 
         assert len(mem.valid_at("2026-02-15")) == 1
         assert len(mem.valid_at("2026-04-15")) == 0
@@ -48,13 +46,11 @@ class TestValidAt:
 
     def test_multiple_temporal_memories(self, mem):
         mem.add("CEO is Kumar", valid_from="2020-01-01")
-        from smriti.types import MemoryEntry
-        entry = MemoryEntry(
-            content="CEO is Kumlee",
+        mem.add(
+            "CEO is Kumlee",
             valid_from="2024-01-01",
             valid_to="2025-12-31",
         )
-        mem.add_entry(entry)
 
         at_2023 = mem.valid_at("2023-06-01")
         contents = [e.content for e in at_2023]
@@ -99,3 +95,23 @@ class TestHistory:
         new = mem.update(mid.id, "updated twice")
         chain = mem.history(new.id)
         assert [c.version for c in chain] == [1, 2, 3]
+
+
+class TestValidToPublicAPI:
+    def test_add_with_valid_to(self, mem):
+        """valid_to is exposed directly in add()."""
+        e = mem.add("Q1 budget", valid_from="2026-01-01", valid_to="2026-03-31")
+        got = mem.get(e.id)
+        assert got.valid_to == "2026-03-31"
+        assert got.valid_from == "2026-01-01"
+
+    def test_add_entry_runs_graph_indexing(self, mem):
+        """add_entry() now goes through the unified pipeline including graph."""
+        from smriti.types import MemoryEntry
+        entry = MemoryEntry(
+            content="Kumar manages the Python team",
+            entities=["Kumar", "Python"],
+        )
+        mem.add_entry(entry)
+        entities = mem.entities(entry.id)
+        assert len(entities) > 0

@@ -73,8 +73,8 @@ class TestConfidence:
         old = mem.add("original", confidence=0.8)
         new = mem.update(old.id, "updated")
         got = mem.get(new.id)
-        # New entry inherits default confidence (1.0), not old
-        assert got.confidence == 1.0
+        # New entry preserves confidence from old
+        assert got.confidence == 0.8
 
 
 class TestTypeSearch:

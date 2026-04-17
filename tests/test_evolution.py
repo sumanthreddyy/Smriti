@@ -132,3 +132,44 @@ class TestEvolution:
         # Old e1 is archived but link to e2 still exists
         old = mem.get(e1.id)
         assert e2.id in old.linked_ids
+
+    def test_update_preserves_valid_to(self, mem):
+        """Update should carry over valid_to from original."""
+        old = mem.add("temp policy", valid_from="2026-01-01", valid_to="2026-06-30")
+        new = mem.update(old.id, "revised policy")
+        got = mem.get(new.id)
+        assert got.valid_to == "2026-06-30"
+        assert got.valid_from == "2026-01-01"
+
+    def test_update_preserves_confidence(self, mem):
+        """Update should carry over confidence from original."""
+        old = mem.add("uncertain fact", confidence=0.4)
+        new = mem.update(old.id, "still uncertain")
+        got = mem.get(new.id)
+        assert got.confidence == 0.4
+
+    def test_update_indexes_graph(self, mem):
+        """Updated memory should be findable via graph search."""
+        old = mem.add("Kumar works at Valve", entities=["Kumar", "Valve"])
+        new = mem.update(old.id, "Kumar works at Epic")
+        # New entry should be in the graph
+        entities = mem.entities(new.id)
+        assert len(entities) > 0
+
+    def test_get_linked_filters_archived(self, mem):
+        """get_linked() should not return archived memories."""
+        e1 = mem.add("central")
+        e2 = mem.add("linked target")
+        mem.link(e1.id, e2.id)
+        mem.delete(e2.id)  # archive e2
+        linked = mem.get_linked(e1.id)
+        assert len(linked) == 0
+
+    def test_related_filters_archived(self, mem):
+        """related() should not return archived memories."""
+        e1 = mem.add("Kumar works at Valve", entities=["Kumar", "Valve"])
+        e2 = mem.add("Kumar likes Python", entities=["Kumar", "Python"])
+        mem.delete(e2.id)  # archive e2
+        related = mem.related(e1.id)
+        ids = [r.id for r in related]
+        assert e2.id not in ids

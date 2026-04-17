@@ -55,8 +55,10 @@ class KnowledgeGraph:
     """Entity-relationship graph backed by SQLite + NetworkX."""
 
     def __init__(self, db_path: str | Path) -> None:
-        self._conn = sqlite3.connect(str(db_path))
+        self._conn = sqlite3.connect(str(db_path), timeout=10)
         self._conn.row_factory = sqlite3.Row
+        self._conn.execute("PRAGMA journal_mode=WAL")
+        self._conn.execute("PRAGMA busy_timeout=5000")
         self._conn.executescript(_GRAPH_SCHEMA)
         self._g: nx.Graph = nx.Graph()
         self._load()
