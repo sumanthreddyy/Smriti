@@ -84,6 +84,17 @@ class HashEmbedding(EmbeddingFunction):
     def __init__(self, dim: int = 384) -> None:
         self._dim = dim
 
+    @staticmethod
+    def name() -> str:
+        return "smriti-hash-embedding"
+
+    def get_config(self) -> dict[str, Any]:
+        return {"dim": self._dim}
+
+    @staticmethod
+    def build_from_config(config: dict[str, Any]) -> "HashEmbedding":
+        return HashEmbedding(dim=config.get("dim", 384))
+
     def __call__(self, input: list[str]) -> list[list[float]]:
         return [self._embed(text) for text in input]
 
@@ -137,7 +148,19 @@ class _SentenceTransformerFn(EmbeddingFunction):
                 f"sentence-transformers is required for '{model_name}'. "
                 "Install with: pip install smriti-mem[small]"
             )
+        self._model_name = model_name
         self._model = SentenceTransformer(model_name, **kwargs)
+
+    @staticmethod
+    def name() -> str:
+        return "smriti-sentence-transformer"
+
+    def get_config(self) -> dict[str, Any]:
+        return {"model_name": self._model_name}
+
+    @staticmethod
+    def build_from_config(config: dict[str, Any]) -> "_SentenceTransformerFn":
+        return _SentenceTransformerFn(model_name=config["model_name"])
 
     def __call__(self, input: list[str]) -> list[list[float]]:
         return self._model.encode(input, normalize_embeddings=True).tolist()

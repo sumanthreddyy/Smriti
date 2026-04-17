@@ -66,6 +66,7 @@ class Memory:
         metadata: dict[str, Any] | None = None,
         session_id: str | None = None,
         valid_from: str | None = None,
+        valid_to: str | None = None,
         entities: list[str] | None = None,
         confidence: float = 1.0,
     ) -> MemoryEntry:
@@ -74,6 +75,8 @@ class Memory:
         Args:
             memory_type: Built-in types are "fact", "belief", "opinion",
                 "observation". Custom strings are also accepted.
+            valid_from: ISO date string — memory is valid starting this date.
+            valid_to: ISO date string — memory is valid until this date.
         """
         entry = MemoryEntry(
             content=content,
@@ -82,24 +85,27 @@ class Memory:
             metadata=metadata or {},
             session_id=session_id,
             valid_from=valid_from,
+            valid_to=valid_to,
             entities=entities or [],
             confidence=confidence,
         )
+        return self._ingest(entry)
+
+    def add_entry(self, entry: MemoryEntry) -> MemoryEntry:
+        """Add a pre-built MemoryEntry directly."""
+        return self._ingest(entry)
+
+    def _ingest(self, entry: MemoryEntry) -> MemoryEntry:
+        """Unified write pipeline: store + vectors + graph."""
         self._store.add(entry)
         self._vectors.add(entry)
 
-        # Extract and index entities in knowledge graph (v0.3)
+        # Extract and index entities in knowledge graph
         extracted = self._graph.add_memory(entry)
         if extracted and not entry.entities:
             entry.entities = extracted
             self._store.update(entry.id, entities=extracted)
 
-        return entry
-
-    def add_entry(self, entry: MemoryEntry) -> MemoryEntry:
-        """Add a pre-built MemoryEntry directly."""
-        self._store.add(entry)
-        self._vectors.add(entry)
         return entry
 
     def get(self, memory_id: str) -> MemoryEntry | None:
@@ -188,47 +194,38 @@ class Memory:
         return build_results(fused, entries, k)
 
     def update(
-        self, memory_id: str, content: str, *, keep_original: bool = True
+        self, memory_id: str, content: str
     ) -> MemoryEntry | None:
         """Update a memory's content.
 
-        If keep_original=True (default), the old entry is archived and a new
-        entry is created with superseded_by linking. Nothing is ever lost.
+        The old entry is archived and a new entry is created with
+        superseded_by linking. Nothing is ever lost.
         """
         old = self._store.get(memory_id)
         if not old:
             return None
 
-        if keep_original:
-            # Create new version
-            new_entry = MemoryEntry(
-                content=content,
-                memory_type=old.memory_type,
-                source=old.source,
-                metadata=old.metadata,
-                session_id=old.session_id,
-                valid_from=old.valid_from,
-                entities=old.entities,
-                linked_ids=old.linked_ids,
-                version=old.version + 1,
-            )
-            # Archive old, link to new
-            self._store.update(
-                memory_id, archived=True, superseded_by=new_entry.id
-            )
-            self._vectors.update_metadata(memory_id, archived=True)
-            # Store new
-            self._store.add(new_entry)
-            self._vectors.add(new_entry)
-            return new_entry
-        else:
-            # In-place update (still non-lossy — SQLite WAL preserves history)
-            self._store.update(memory_id, content=content)
-            # Re-embed
-            updated = self._store.get(memory_id)
-            if updated:
-                self._vectors.add(updated)
-            return updated
+        # Create new version — preserve ALL fields from the original
+        new_entry = MemoryEntry(
+            content=content,
+            memory_type=old.memory_type,
+            source=old.source,
+            metadata=old.metadata,
+            session_id=old.session_id,
+            valid_from=old.valid_from,
+            valid_to=old.valid_to,
+            entities=old.entities,
+            linked_ids=old.linked_ids,
+            version=old.version + 1,
+            confidence=old.confidence,
+        )
+        # Archive old, link to new
+        self._store.update(
+            memory_id, archived=True, superseded_by=new_entry.id
+        )
+        self._vectors.update_metadata(memory_id, archived=True)
+        # Ingest new through unified pipeline (store + vectors + graph)
+        return self._ingest(new_entry)
 
     def delete(self, memory_id: str) -> bool:
         """Soft-delete (archive). Data is NEVER removed.
@@ -277,9 +274,13 @@ class Memory:
     # ── Knowledge graph (v0.3) ───────────────────────────────────────
 
     def related(self, memory_id: str) -> list[MemoryEntry]:
-        """Find memories that share entities with the given memory."""
+        """Find memories that share entities with the given memory.
+
+        Only returns active (non-archived) memories.
+        """
         related_ids = self._graph.get_related(memory_id)
-        return self._store.get_many(related_ids)
+        entries = self._store.get_many(related_ids)
+        return [e for e in entries if not e.archived]
 
     def entities(self, memory_id: str) -> list[str]:
         """Get entities extracted from a memory."""
@@ -298,11 +299,12 @@ class Memory:
         return self._store.add_link(id1, id2)
 
     def get_linked(self, memory_id: str) -> list[MemoryEntry]:
-        """Get all memories linked to the given memory."""
+        """Get all active (non-archived) memories linked to the given memory."""
         entry = self._store.get(memory_id)
         if not entry or not entry.linked_ids:
             return []
-        return self._store.get_many(entry.linked_ids)
+        entries = self._store.get_many(entry.linked_ids)
+        return [e for e in entries if not e.archived]
 
     def close(self) -> None:
         self._store.close()
