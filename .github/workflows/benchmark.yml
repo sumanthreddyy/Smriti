@@ -2,13 +2,26 @@ name: Benchmark
 
 on:
   workflow_dispatch:  # manual trigger from Actions tab
+  pull_request:
+    types: [labeled, synchronize, reopened]
 
 jobs:
   benchmark:
+    # On PR: only run if the PR carries the `benchmark` label. Manual
+    # dispatch always runs. Keeps CI cheap for unrelated PRs.
+    if: >-
+      github.event_name == 'workflow_dispatch' ||
+      (github.event_name == 'pull_request' &&
+       contains(github.event.pull_request.labels.*.name, 'benchmark'))
     runs-on: ubuntu-latest
     strategy:
+      fail-fast: false
       matrix:
-        embedding: [hash, default, bge]
+        config:
+          - { embedding: hash,    rerank: none,            label: "hash" }
+          - { embedding: default, rerank: none,            label: "default" }
+          - { embedding: default, rerank: ms-marco-minilm, label: "default-rerank" }
+          - { embedding: bge,     rerank: none,            label: "bge" }
     timeout-minutes: 360
 
     steps:
@@ -24,16 +37,23 @@ jobs:
           pip install -e ".[dev]"
           pip install sentence-transformers
 
-      - name: Run LongMemEval-S (--embedding ${{ matrix.embedding }})
+      - name: Run LongMemEval-S (${{ matrix.config.label }})
         run: |
           LIMIT_FLAG=""
-          if [ "${{ matrix.embedding }}" = "bge" ]; then
+          if [ "${{ matrix.config.embedding }}" = "bge" ]; then
             LIMIT_FLAG="--limit 160"
           fi
-          python bench/run_longmemeval.py --embedding ${{ matrix.embedding }} $LIMIT_FLAG
+          RERANK_FLAG=""
+          if [ "${{ matrix.config.rerank }}" != "none" ]; then
+            RERANK_FLAG="--rerank ${{ matrix.config.rerank }}"
+          fi
+          python bench/run_longmemeval.py \
+            --embedding ${{ matrix.config.embedding }} \
+            $RERANK_FLAG \
+            $LIMIT_FLAG
 
       - name: Upload results
         uses: actions/upload-artifact@v4
         with:
-          name: benchmark-${{ matrix.embedding }}
+          name: benchmark-${{ matrix.config.label }}
           path: bench/progress.log

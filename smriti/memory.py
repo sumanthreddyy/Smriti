@@ -40,6 +40,7 @@ class Memory:
         path: str | None = None,
         config: SmritiConfig | None = None,
         embedding_fn: object | None = None,
+        reranker: object | None = None,
     ) -> None:
         self._config = config or SmritiConfig()
         if path:
@@ -56,6 +57,9 @@ class Memory:
             key_expansion=self._config.key_expansion,
         )
         self._graph = KnowledgeGraph(base / "smriti.db")
+        # Optional callable: (query, [(id, content), ...]) -> [(id, score), ...]
+        # Scores are arbitrary (higher = better); we re-sort and truncate.
+        self._reranker = reranker
 
     def add(
         self,
@@ -123,7 +127,16 @@ class Memory:
             query: Natural language search query.
             top_k: Max results to return.
             include_archived: Include soft-deleted memories.
-            mode: "hybrid" (default), "semantic", or "bm25".
+            mode: "hybrid" (default), "semantic", "bm25", or "graph".
+
+        Retrieval pipeline (v0.7):
+            1. Each retriever returns `top_k * fetch_multiplier` candidates
+               (prevents RRF starvation — see SmritiConfig.fetch_multiplier).
+            2. Candidates are fused via weighted Reciprocal Rank Fusion.
+            3. If a cross-encoder `reranker` is attached, the fused top
+               (top_k * rerank_fetch_multiplier) are re-scored by content
+               and re-sorted before truncation.
+            4. Truncated to `top_k` and returned as SearchResult objects.
 
         Returns:
             Ranked list of SearchResult objects.
@@ -133,23 +146,33 @@ class Memory:
             raise ValueError(f"Invalid mode '{mode}'. Choose from: {_VALID_MODES}")
 
         k = top_k or self._config.default_top_k
+        # Over-fetch from each retriever so RRF can actually fuse.
+        fetch_k = max(k, k * self._config.fetch_multiplier)
+        # Include graph in hybrid only when explicitly enabled.
+        use_graph = (mode == "graph") or (
+            mode == "hybrid" and self._config.use_graph_in_hybrid
+        )
 
         # Fetch from each retriever
         ranked_lists: list[list[tuple[str, float]]] = []
         list_names: list[str] = []
 
         if mode in ("hybrid", "semantic"):
-            semantic = self._vectors.search(query, top_k=k, include_archived=include_archived)
+            semantic = self._vectors.search(
+                query, top_k=fetch_k, include_archived=include_archived
+            )
             ranked_lists.append(semantic)
             list_names.append("semantic")
 
         if mode in ("hybrid", "bm25"):
-            bm25 = self._store.bm25_search(query, top_k=k, include_archived=include_archived)
+            bm25 = self._store.bm25_search(
+                query, top_k=fetch_k, include_archived=include_archived
+            )
             ranked_lists.append(bm25)
             list_names.append("bm25")
 
-        if mode in ("hybrid", "graph"):
-            graph_results = self._graph.search(query, top_k=k)
+        if use_graph:
+            graph_results = self._graph.search(query, top_k=fetch_k)
             if graph_results:
                 ranked_lists.append(graph_results)
                 list_names.append("graph")
@@ -159,33 +182,75 @@ class Memory:
 
         # Single mode — skip RRF
         if len(ranked_lists) == 1:
-            all_ids = [id_ for id_, _ in ranked_lists[0][:k]]
-            entries = {e.id: e for e in self._store.get_many(all_ids)}
-            if not include_archived:
-                entries = {i: e for i, e in entries.items() if not e.archived}
-            return build_results(
-                [(id_, score, [list_names[0]]) for id_, score in ranked_lists[0][:k]],
-                entries,
-                k,
+            candidates = [
+                (id_, score, [list_names[0]]) for id_, score in ranked_lists[0]
+            ]
+        else:
+            # Hybrid — fuse with weighted RRF.
+            weights = {
+                "semantic": self._config.semantic_weight,
+                "bm25": self._config.bm25_weight,
+                "graph": self._config.graph_weight,
+            }
+            candidates = reciprocal_rank_fusion(
+                ranked_lists, list_names, k=self._config.rrf_k, weights=weights
             )
 
-        # Hybrid — fuse with RRF
-        weights = {
-            "semantic": self._config.semantic_weight,
-            "bm25": self._config.bm25_weight,
-            "graph": self._config.graph_weight,
-        }
-        fused = reciprocal_rank_fusion(
-            ranked_lists, list_names, k=self._config.rrf_k, weights=weights
-        )
+        # Optional cross-encoder rerank on a wider slice before truncation.
+        candidates = self._maybe_rerank(query, candidates, k)
 
-        # Fetch full entries from SQLite
-        all_ids = [id_ for id_, _, _ in fused[:k]]
+        # Fetch full entries and materialize results.
+        all_ids = [id_ for id_, _, _ in candidates[:k]]
         entries = {e.id: e for e in self._store.get_many(all_ids)}
         if not include_archived:
             entries = {i: e for i, e in entries.items() if not e.archived}
 
-        return build_results(fused, entries, k)
+        return build_results(candidates, entries, k)
+
+    def _maybe_rerank(
+        self,
+        query: str,
+        candidates: list[tuple[str, float, list[str]]],
+        top_k: int,
+    ) -> list[tuple[str, float, list[str]]]:
+        """Apply the attached cross-encoder reranker, if any.
+
+        Only the top `top_k * rerank_fetch_multiplier` candidates are scored
+        to bound CE latency (CE is ~1ms/pair on CPU with MiniLM-L6).
+        """
+        if self._reranker is None or not candidates:
+            return candidates
+
+        rerank_pool = top_k * self._config.rerank_fetch_multiplier
+        head = candidates[:rerank_pool]
+        tail = candidates[rerank_pool:]
+
+        ids = [cid for cid, _, _ in head]
+        id_to_entry = {e.id: e for e in self._store.get_many(ids)}
+        pairs = [
+            (cid, id_to_entry[cid].content)
+            for cid, _, _ in head
+            if cid in id_to_entry
+        ]
+        if not pairs:
+            return candidates
+
+        try:
+            ce_scores = self._reranker(query, pairs)  # [(id, score), ...]
+        except Exception:
+            # Reranker must never take down a query — fall back to RRF order.
+            return candidates
+
+        ce_by_id = {cid: s for cid, s in ce_scores}
+        # Merge CE score back into the candidate triple, preserving sources.
+        rescored: list[tuple[str, float, list[str]]] = []
+        for cid, rrf_score, srcs in head:
+            if cid in ce_by_id:
+                rescored.append((cid, float(ce_by_id[cid]), srcs + ["rerank"]))
+            else:
+                rescored.append((cid, rrf_score, srcs))
+        rescored.sort(key=lambda x: x[1], reverse=True)
+        return rescored + tail
 
     def update(
         self, memory_id: str, content: str, *, keep_original: bool = True
