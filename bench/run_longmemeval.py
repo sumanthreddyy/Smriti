@@ -28,11 +28,13 @@ REPO_ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(REPO_ROOT))
 
 from smriti import Memory, __version__
+from smriti.config import SmritiConfig
 from smriti.vectors import HashEmbedding
 
 EMBEDDING_LABELS = {
     "hash": "HashEmbedding (deterministic, no model)",
     "default": "ChromaDB default (sentence-transformers)",
+    "minilm": "all-MiniLM-L6-v2 (sentence-transformers)",
     "bge": "BGE-large-en-v1.5 (BAAI)",
 }
 
@@ -87,7 +89,10 @@ def concat_session(turns: list[dict]) -> str:
 
 def evaluate_question(
     item: dict,
-    embedding_fn: HashEmbedding,
+    embedding_fn: object | None,
+    reranker: object | None,
+    config: SmritiConfig,
+    search_mode: str,
     base_tmp: str,
     idx: int,
 ) -> dict:
@@ -98,7 +103,12 @@ def evaluate_question(
     tmp_dir = os.path.join(base_tmp, f"q{idx}")
     os.makedirs(tmp_dir, exist_ok=True)
     try:
-        mem = Memory(path=tmp_dir, embedding_fn=embedding_fn)
+        per_q_config = config.model_copy(update={"path": tmp_dir})
+        mem = Memory(
+            config=per_q_config,
+            embedding_fn=embedding_fn,
+            reranker=reranker,
+        )
 
         haystack_session_ids = item["haystack_session_ids"]
         haystack_sessions = item["haystack_sessions"]
@@ -117,7 +127,7 @@ def evaluate_question(
         # Search at the largest K, then slice for smaller K values
         max_k = max(K_VALUES)
         t_search = time.time()
-        results = mem.search(question, top_k=max_k, mode="hybrid")
+        results = mem.search(question, top_k=max_k, mode=search_mode)
         search_latency = time.time() - t_search
 
         retrieved_sids: list[str | None] = [
@@ -148,8 +158,50 @@ def main() -> None:
     parser = argparse.ArgumentParser(description="LongMemEval-S benchmark for Smriti")
     parser.add_argument("--limit", type=int, default=0,
                         help="Limit to N questions (0 = all)")
-    parser.add_argument("--embedding", choices=["hash", "default", "bge"], default="hash",
-                        help="Embedding mode: 'hash' (offline), 'default' (sentence-transformers), or 'bge' (BGE-large)")
+    parser.add_argument(
+        "--embedding",
+        choices=["hash", "default", "minilm", "bge"],
+        default="hash",
+        help=(
+            "Embedding: 'hash' (offline), 'default' (ChromaDB's), "
+            "'minilm', or 'bge' (BGE-large)"
+        ),
+    )
+    parser.add_argument(
+        "--mode",
+        choices=["hybrid", "semantic", "bm25", "graph"],
+        default="hybrid",
+        help="Retrieval mode used in mem.search() (default: hybrid)",
+    )
+    parser.add_argument(
+        "--fetch-multiplier",
+        type=int,
+        default=None,
+        help=(
+            "Over-fetch multiplier per retriever before RRF. "
+            "Default: let Memory pick per-embedding (hash=1, others=5)."
+        ),
+    )
+    parser.add_argument(
+        "--graph-in-hybrid",
+        choices=["auto", "on", "off"],
+        default="auto",
+        help=(
+            "Include the knowledge graph in hybrid mode. 'auto' lets "
+            "Memory decide per-embedding (hash=on, others=off)."
+        ),
+    )
+    parser.add_argument(
+        "--rerank",
+        choices=[
+            "none",
+            "ms-marco-minilm",
+            "ms-marco-minilm-l12",
+            "bge-reranker-base",
+        ],
+        default="none",
+        help="Cross-encoder reranker to apply after RRF (default: none)",
+    )
     args = parser.parse_args()
 
     log(f"Smriti v{__version__} — LongMemEval-S Benchmark")
@@ -170,22 +222,50 @@ def main() -> None:
         questions = questions[: args.limit]
         log(f"--limit {args.limit}: evaluating first {len(questions)} questions.\n")
 
-    # 3. Embedding function
+    # 3. Embedding function — build ONCE and reuse across all questions.
+    # Previously `--embedding default` passed None per question, forcing
+    # ChromaDB to re-instantiate MiniLM for every Memory() built in the loop.
     if args.embedding == "hash":
-        embedding_fn = HashEmbedding()
+        embedding_fn: object | None = HashEmbedding()
+    elif args.embedding == "minilm":
+        from smriti.vectors import load_embedding
+        embedding_fn = load_embedding("minilm")
     elif args.embedding == "bge":
         from smriti.vectors import load_embedding
         embedding_fn = load_embedding("bge-large")
-    else:
-        embedding_fn = None  # ChromaDB default (sentence-transformers)
+    else:  # default
+        embedding_fn = None  # Chroma will pick its default
     embed_label = EMBEDDING_LABELS[args.embedding]
     log(f"Embedding: {embed_label}\n")
 
-    # 4. Create a single temp base directory for all questions
+    # 4. Optional cross-encoder reranker — also load ONCE.
+    reranker: object | None = None
+    if args.rerank != "none":
+        from smriti.vectors import load_reranker
+        log(f"Loading reranker: {args.rerank}")
+        reranker = load_reranker(args.rerank)
+
+    # 5. Shared config for every per-question Memory. Only pass overrides
+    # the caller actually set — that way Memory can auto-tune defaults
+    # per embedding (e.g. hash gets fetch=1, graph=on).
+    config_overrides: dict[str, object] = {}
+    if args.fetch_multiplier is not None:
+        config_overrides["fetch_multiplier"] = args.fetch_multiplier
+    if args.graph_in_hybrid != "auto":
+        config_overrides["use_graph_in_hybrid"] = args.graph_in_hybrid == "on"
+    base_config = SmritiConfig(**config_overrides)
+    log(
+        f"Retrieval: mode={args.mode}  "
+        f"fetch_multiplier={base_config.fetch_multiplier}  "
+        f"use_graph_in_hybrid={base_config.use_graph_in_hybrid}  "
+        f"rerank={args.rerank}\n"
+    )
+
+    # 6. Create a single temp base directory for all questions
     base_tmp = tempfile.mkdtemp(prefix="smriti_longmemeval_")
     log(f"Temp directory: {base_tmp}\n")
 
-    # 5. Evaluate
+    # 7. Evaluate
     type_hits: dict[str, dict[int, int]] = defaultdict(lambda: {k: 0 for k in K_VALUES})
     type_counts: dict[str, int] = defaultdict(int)
     search_latencies: list[float] = []
@@ -197,7 +277,15 @@ def main() -> None:
     t0 = time.time()
     for i, item in enumerate(questions):
         tq = time.time()
-        result = evaluate_question(item, embedding_fn, base_tmp, i)
+        result = evaluate_question(
+            item,
+            embedding_fn,
+            reranker,
+            base_config,
+            args.mode,
+            base_tmp,
+            i,
+        )
         dt = time.time() - tq
         qtype = result["question_type"]
         type_counts[qtype] += 1
@@ -220,9 +308,13 @@ def main() -> None:
     # Cleanup
     shutil.rmtree(base_tmp, ignore_errors=True)
 
-    # 6. Report
+    # 8. Report
     log("")
     log(f"LongMemEval-S Benchmark Results (Smriti v{__version__}, {embed_label})")
+    log(
+        f"  mode={args.mode}  fetch_multiplier={base_config.fetch_multiplier}  "
+        f"use_graph_in_hybrid={base_config.use_graph_in_hybrid}  rerank={args.rerank}"
+    )
     log("=" * 64)
     header = f"{'Question Type':<28}| {'Count':>5} | {'R@5':>5} | {'R@10':>5} | {'R@20':>5}"
     log(header)

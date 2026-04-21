@@ -169,6 +169,58 @@ def load_embedding(model: str) -> EmbeddingFunction:
     return _SentenceTransformerFn(info["name"], **info["kwargs"])
 
 
+# ── Cross-encoder rerankers ──────────────────────────────────────────────
+
+_RERANKERS: dict[str, str] = {
+    # 22 MB MiniLM cross-encoder, MIT-licensed, CPU-friendly.
+    "ms-marco-minilm": "cross-encoder/ms-marco-MiniLM-L-6-v2",
+    # Larger MS-MARCO CE, better quality, still CPU-feasible.
+    "ms-marco-minilm-l12": "cross-encoder/ms-marco-MiniLM-L-12-v2",
+    # BGE multilingual reranker, larger but strong.
+    "bge-reranker-base": "BAAI/bge-reranker-base",
+}
+
+
+def load_reranker(model: str = "ms-marco-minilm") -> Any:
+    """Load a cross-encoder reranker as a plain callable.
+
+    The returned callable has the signature:
+        (query: str, pairs: list[tuple[str, str]]) -> list[tuple[str, float]]
+
+    Where ``pairs`` is [(id, content), ...] and the output is
+    [(id, ce_score), ...] in the same order as the input. Higher score is
+    better. This is the contract consumed by ``Memory(reranker=...)``.
+
+    Args:
+        model: One of "ms-marco-minilm" (default, 22MB), "ms-marco-minilm-l12",
+            or "bge-reranker-base". Custom HF repo IDs are also accepted.
+
+    Examples:
+        >>> from smriti import Memory
+        >>> from smriti.vectors import load_reranker
+        >>> mem = Memory(reranker=load_reranker())
+    """
+    try:
+        from sentence_transformers import CrossEncoder  # type: ignore
+    except ImportError as exc:
+        raise ImportError(
+            "Cross-encoder rerankers require the 'rerank' extra. "
+            "Install with: pip install smriti-mem[rerank]"
+        ) from exc
+
+    model_name = _RERANKERS.get(model, model)
+    ce = CrossEncoder(model_name)
+
+    def _rerank(query: str, pairs: list[tuple[str, str]]) -> list[tuple[str, float]]:
+        if not pairs:
+            return []
+        sentence_pairs = [[query, content] for _, content in pairs]
+        scores = ce.predict(sentence_pairs, convert_to_numpy=True)
+        return [(pairs[i][0], float(scores[i])) for i in range(len(pairs))]
+
+    return _rerank
+
+
 class VectorStore:
     """ChromaDB-backed semantic search."""
 
@@ -180,24 +232,32 @@ class VectorStore:
         key_expansion: bool = True,
     ) -> None:
         self._key_expansion = key_expansion
-        self._client = chromadb.PersistentClient(path=str(persist_dir))
+        persist_path = Path(persist_dir)
+        persist_path.mkdir(parents=True, exist_ok=True)
+        self._client = chromadb.PersistentClient(path=str(persist_path))
+        # Probe caching: avoid a model download + upsert/delete round-trip on
+        # every Memory() construction (matters on benchmarks where hundreds
+        # of Memory instances are built in a single run).
+        probe_marker = persist_path / ".smriti_default_embed_ok"
+
         # Use provided embedding function, or try default, fall back to hash
         if embedding_fn is None:
             try:
-                # Try ChromaDB's default (downloads model on first use)
                 self._collection = self._client.get_or_create_collection(
                     name=collection_name,
                     metadata={"hnsw:space": "cosine"},
                 )
-                # Test if it works by doing a quick embed
-                self._collection.upsert(
-                    ids=["__smriti_probe__"],
-                    documents=["probe"],
-                )
-                self._collection.delete(ids=["__smriti_probe__"])
+                if not probe_marker.exists():
+                    # First open: verify the default embedder actually works.
+                    self._collection.upsert(
+                        ids=["__smriti_probe__"],
+                        documents=["probe"],
+                    )
+                    self._collection.delete(ids=["__smriti_probe__"])
+                    probe_marker.touch()
                 return
             except (ImportError, RuntimeError, OSError):
-                # Model download failed — fall back to hash embedding
+                # Model download failed — fall back to hash embedding.
                 embedding_fn = HashEmbedding()
 
         self._collection = self._client.get_or_create_collection(
