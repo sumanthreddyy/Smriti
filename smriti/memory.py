@@ -24,7 +24,7 @@ from smriti.graph import KnowledgeGraph
 from smriti.search import build_results, reciprocal_rank_fusion
 from smriti.store import Store
 from smriti.types import MemoryEntry, SearchResult
-from smriti.vectors import VectorStore
+from smriti.vectors import HashEmbedding, VectorStore
 
 
 class Memory:
@@ -45,6 +45,22 @@ class Memory:
         self._config = config or SmritiConfig()
         if path:
             self._config = self._config.model_copy(update={"path": path})
+
+        # Auto-tune retrieval defaults for HashEmbedding. The v0.7 defaults
+        # (fetch_multiplier=5, use_graph_in_hybrid=False) were measured on
+        # MiniLM and regressed HashEmbedding on LongMemEval-S from 0.77 → 0.60
+        # R@5 — over-fetch adds noise to bag-of-words signatures, and the
+        # co-occurrence graph was doing real work when the embedding has no
+        # real semantics. Only override fields the caller did not set.
+        if isinstance(embedding_fn, HashEmbedding):
+            set_fields = self._config.model_fields_set
+            overrides: dict[str, Any] = {}
+            if "fetch_multiplier" not in set_fields:
+                overrides["fetch_multiplier"] = 1
+            if "use_graph_in_hybrid" not in set_fields:
+                overrides["use_graph_in_hybrid"] = True
+            if overrides:
+                self._config = self._config.model_copy(update=overrides)
 
         base = Path(self._config.path)
         base.mkdir(parents=True, exist_ok=True)

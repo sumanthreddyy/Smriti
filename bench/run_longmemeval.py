@@ -176,13 +176,20 @@ def main() -> None:
     parser.add_argument(
         "--fetch-multiplier",
         type=int,
-        default=5,
-        help="Over-fetch multiplier per retriever before RRF (default: 5)",
+        default=None,
+        help=(
+            "Over-fetch multiplier per retriever before RRF. "
+            "Default: let Memory pick per-embedding (hash=1, others=5)."
+        ),
     )
     parser.add_argument(
-        "--use-graph-in-hybrid",
-        action="store_true",
-        help="Include the knowledge graph retriever in hybrid mode (default: off)",
+        "--graph-in-hybrid",
+        choices=["auto", "on", "off"],
+        default="auto",
+        help=(
+            "Include the knowledge graph in hybrid mode. 'auto' lets "
+            "Memory decide per-embedding (hash=on, others=off)."
+        ),
     )
     parser.add_argument(
         "--rerank",
@@ -238,14 +245,20 @@ def main() -> None:
         log(f"Loading reranker: {args.rerank}")
         reranker = load_reranker(args.rerank)
 
-    # 5. Shared config for every per-question Memory.
-    base_config = SmritiConfig(
-        fetch_multiplier=args.fetch_multiplier,
-        use_graph_in_hybrid=args.use_graph_in_hybrid,
-    )
+    # 5. Shared config for every per-question Memory. Only pass overrides
+    # the caller actually set — that way Memory can auto-tune defaults
+    # per embedding (e.g. hash gets fetch=1, graph=on).
+    config_overrides: dict[str, object] = {}
+    if args.fetch_multiplier is not None:
+        config_overrides["fetch_multiplier"] = args.fetch_multiplier
+    if args.graph_in_hybrid != "auto":
+        config_overrides["use_graph_in_hybrid"] = args.graph_in_hybrid == "on"
+    base_config = SmritiConfig(**config_overrides)
     log(
-        f"Retrieval: mode={args.mode}  fetch_multiplier={args.fetch_multiplier}  "
-        f"use_graph_in_hybrid={args.use_graph_in_hybrid}  rerank={args.rerank}\n"
+        f"Retrieval: mode={args.mode}  "
+        f"fetch_multiplier={base_config.fetch_multiplier}  "
+        f"use_graph_in_hybrid={base_config.use_graph_in_hybrid}  "
+        f"rerank={args.rerank}\n"
     )
 
     # 6. Create a single temp base directory for all questions
@@ -299,8 +312,8 @@ def main() -> None:
     log("")
     log(f"LongMemEval-S Benchmark Results (Smriti v{__version__}, {embed_label})")
     log(
-        f"  mode={args.mode}  fetch_multiplier={args.fetch_multiplier}  "
-        f"use_graph_in_hybrid={args.use_graph_in_hybrid}  rerank={args.rerank}"
+        f"  mode={args.mode}  fetch_multiplier={base_config.fetch_multiplier}  "
+        f"use_graph_in_hybrid={base_config.use_graph_in_hybrid}  rerank={args.rerank}"
     )
     log("=" * 64)
     header = f"{'Question Type':<28}| {'Count':>5} | {'R@5':>5} | {'R@10':>5} | {'R@20':>5}"

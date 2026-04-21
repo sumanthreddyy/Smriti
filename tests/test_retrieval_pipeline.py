@@ -22,12 +22,22 @@ from smriti.vectors import HashEmbedding
 
 @pytest.fixture
 def mem_factory():
+    """Build a Memory with the v0.7 MiniLM-era defaults applied explicitly.
+
+    These tests assert the v0.7 retrieval-pipeline behaviour. Because the
+    fixture uses HashEmbedding, Memory would normally auto-tune hash-friendly
+    defaults (fetch=1, graph=on). We pass the v0.7 defaults explicitly so
+    each field is in ``model_fields_set`` and the auto-tune is bypassed.
+    The hash auto-tune itself is covered in ``TestHashAutoTune``.
+    """
     tmpdirs: list[str] = []
 
     def _make(config: SmritiConfig | None = None, reranker=None) -> Memory:
         tmp = tempfile.mkdtemp()
         tmpdirs.append(tmp)
-        cfg = (config or SmritiConfig()).model_copy(update={"path": tmp})
+        if config is None:
+            config = SmritiConfig(fetch_multiplier=5, use_graph_in_hybrid=False)
+        cfg = config.model_copy(update={"path": tmp})
         return Memory(config=cfg, embedding_fn=HashEmbedding(), reranker=reranker)
 
     yield _make
@@ -138,3 +148,66 @@ class TestInvalidMode:
         mem = mem_factory()
         with pytest.raises(ValueError):
             mem.search("q", mode="nope")
+
+
+class TestHashAutoTune:
+    """Memory auto-tunes retrieval defaults for HashEmbedding.
+
+    v0.7's MiniLM defaults (fetch_multiplier=5, use_graph_in_hybrid=False)
+    regressed HashEmbedding on LongMemEval-S from 0.77 → 0.60 R@5. When
+    the caller doesn't override these fields, Memory should flip them back
+    to the hash-friendly values (fetch=1, graph=on).
+    """
+
+    def test_defaults_flip_for_hash(self, tmp_path):
+        mem = Memory(
+            config=SmritiConfig(path=str(tmp_path)),
+            embedding_fn=HashEmbedding(),
+        )
+        assert mem._config.fetch_multiplier == 1
+        assert mem._config.use_graph_in_hybrid is True
+        mem.close()
+
+    def test_explicit_fetch_multiplier_is_respected(self, tmp_path):
+        mem = Memory(
+            config=SmritiConfig(path=str(tmp_path), fetch_multiplier=7),
+            embedding_fn=HashEmbedding(),
+        )
+        assert mem._config.fetch_multiplier == 7
+        # graph flag was not set, so it still auto-tunes.
+        assert mem._config.use_graph_in_hybrid is True
+        mem.close()
+
+    def test_explicit_graph_flag_is_respected(self, tmp_path):
+        mem = Memory(
+            config=SmritiConfig(path=str(tmp_path), use_graph_in_hybrid=False),
+            embedding_fn=HashEmbedding(),
+        )
+        assert mem._config.use_graph_in_hybrid is False
+        assert mem._config.fetch_multiplier == 1
+        mem.close()
+
+    def test_no_autotune_for_non_hash_embedding(self, tmp_path):
+        # A caller-supplied non-hash embedding must not trigger the override.
+        class FakeEmbed:
+            def __call__(self, input):
+                return [[0.0] * 8 for _ in input]
+
+            @staticmethod
+            def name():
+                return "fake"
+
+            def get_config(self):
+                return {}
+
+            @staticmethod
+            def build_from_config(config):
+                return FakeEmbed()
+
+        mem = Memory(
+            config=SmritiConfig(path=str(tmp_path)),
+            embedding_fn=FakeEmbed(),
+        )
+        assert mem._config.fetch_multiplier == 5
+        assert mem._config.use_graph_in_hybrid is False
+        mem.close()
